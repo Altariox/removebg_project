@@ -12,6 +12,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$SCRIPT_DIR"
 
 INPUT_DIR="${1:-/home/altariox/Videos/removebg}"
+shift || true
+
+# Extra args passed to the Python script (e.g., --interval 5)
+PY_ARGS=("$@")
 
 if [[ ! -d "$INPUT_DIR" ]]; then
   echo "Input directory not found: $INPUT_DIR" >&2
@@ -49,9 +53,14 @@ if [[ "$USE_GPU_FLAG" == "1" ]]; then
   EXTRA_ARGS+=("--prefer-gpu")
 fi
 
+# Continuous mode: set WATCH=1 (interval defaults to 10 seconds)
+if [[ "${WATCH:-0}" == "1" ]]; then
+  EXTRA_ARGS+=("--watch" "--interval" "${INTERVAL:-10}")
+fi
+
 docker run "${DOCKER_RUN_ARGS[@]}" \
   -v "$PROJECT_DIR:/work:ro" \
   -v "$INPUT_DIR:/input" \
   -w /work \
   "$IMAGE" \
-  python /work/removebg_batch.py --input-dir /input --skip-existing "${EXTRA_ARGS[@]}"
+  python /work/removebg_batch.py --input-dir /input --skip-existing "${EXTRA_ARGS[@]}" "${PY_ARGS[@]}"

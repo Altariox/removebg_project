@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -79,7 +80,7 @@ def convert_to_jpg(input_path: Path, jpg_path: Path, quality: int = 95) -> None:
 def _create_rembg_session(prefer_gpu: bool):
     # rembg uses onnxruntime under the hood; providers are passed to new_session.
     try:
-        from rembg import new_session
+        from rembg import new_session  # type: ignore[import-not-found]
     except Exception as e:
         raise RuntimeError(
             "rembg backend is not available in this Python environment. "
@@ -102,7 +103,7 @@ def remove_background(jpg_path: Path, out_path: Path, prefer_gpu: bool) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     try:
-        from rembg import remove
+        from rembg import remove  # type: ignore[import-not-found]
     except Exception as e:
         raise RuntimeError(
             "rembg backend is not available in this Python environment. "
@@ -143,6 +144,23 @@ def main() -> int:
         action="store_true",
         help="Skip files that already have outputs",
     )
+    parser.add_argument(
+        "--watch",
+        action="store_true",
+        help="Continuously scan the folder for new images.",
+    )
+    parser.add_argument(
+        "--interval",
+        type=float,
+        default=10.0,
+        help="Watch mode scan interval in seconds (default: 10).",
+    )
+    parser.add_argument(
+        "--min-age",
+        type=float,
+        default=2.0,
+        help="Skip files modified within the last N seconds to avoid partial writes (default: 2).",
+    )
 
     args = parser.parse_args()
 
@@ -158,10 +176,25 @@ def main() -> int:
 
     paths = Paths(input_dir=input_dir, jpg_dir=jpg_dir, output_dir=output_dir)
 
-    files = sorted([p for p in paths.input_dir.iterdir() if p.is_file()])
-    if not files:
-        print(f"No files found in {paths.input_dir}")
-        return 0
+    def is_stable_file(path: Path) -> bool:
+        try:
+            st = path.stat()
+        except FileNotFoundError:
+            return False
+        return (time.time() - st.st_mtime) >= float(args.min_age)
+
+    def iter_candidate_files() -> list[Path]:
+        # Avoid re-processing generated folders if they live under input.
+        ignore_dirs = {paths.jpg_dir.resolve(), paths.output_dir.resolve()}
+        out: list[Path] = []
+        for p in paths.input_dir.iterdir():
+            if not p.is_file():
+                continue
+            parent = p.parent.resolve()
+            if parent in ignore_dirs:
+                continue
+            out.append(p)
+        return sorted(out)
 
     processed = 0
     skipped = 0
@@ -172,39 +205,63 @@ def main() -> int:
     print(f"JPG:    {paths.jpg_dir}")
     print(f"Output: {paths.output_dir} (PNG transparent)")
     print(f"GPU:    {'requested' if args.prefer_gpu else 'not requested'}")
+    if args.watch:
+        print(f"Watch:  enabled (interval={args.interval}s, min_age={args.min_age}s)")
 
-    for src in files:
-        if not is_probably_image(src):
-            skipped += 1
-            continue
+    def process_once() -> tuple[int, int, int]:
+        nonlocal processed, skipped, errors
 
-        stem = src.stem
-        jpg_path = paths.jpg_dir / f"{stem}.jpg"
-        out_path = paths.output_dir / f"{stem}_nobg.png"
+        files = iter_candidate_files()
+        if not files and not args.watch:
+            print(f"No files found in {paths.input_dir}")
+            return processed, skipped, errors
 
-        if args.skip_existing and out_path.exists() and jpg_path.exists():
-            skipped += 1
-            continue
+        for src in files:
+            if not is_stable_file(src):
+                skipped += 1
+                continue
 
-        try:
-            convert_to_jpg(src, jpg_path, quality=args.quality)
-        except Exception as e:
-            errors += 1
-            _eprint(f"[ERR] JPG conversion failed for {src.name}: {e}")
-            continue
+            if not is_probably_image(src):
+                skipped += 1
+                continue
 
-        try:
-            remove_background(jpg_path, out_path, prefer_gpu=args.prefer_gpu)
-        except Exception as e:
-            errors += 1
-            _eprint(f"[ERR] Background removal failed for {jpg_path.name}: {e}")
-            continue
+            stem = src.stem
+            jpg_path = paths.jpg_dir / f"{stem}.jpg"
+            out_path = paths.output_dir / f"{stem}_nobg.png"
 
-        processed += 1
-        print(f"[OK] {src.name} -> {jpg_path.name} -> {out_path.name}")
+            if args.skip_existing and out_path.exists() and jpg_path.exists():
+                skipped += 1
+                continue
 
-    print(f"Done. processed={processed} skipped={skipped} errors={errors}")
-    return 0 if errors == 0 else 1
+            try:
+                # If already a JPG/JPEG, we still normalize into <jpg_dir>/<stem>.jpg
+                convert_to_jpg(src, jpg_path, quality=args.quality)
+            except Exception as e:
+                errors += 1
+                _eprint(f"[ERR] JPG conversion failed for {src.name}: {e}")
+                continue
+
+            try:
+                remove_background(jpg_path, out_path, prefer_gpu=args.prefer_gpu)
+            except Exception as e:
+                errors += 1
+                _eprint(f"[ERR] Background removal failed for {jpg_path.name}: {e}")
+                continue
+
+            processed += 1
+            print(f"[OK] {src.name} -> {jpg_path.name} -> {out_path.name}")
+
+        return processed, skipped, errors
+
+    if not args.watch:
+        process_once()
+        print(f"Done. processed={processed} skipped={skipped} errors={errors}")
+        return 0 if errors == 0 else 1
+
+    # Watch loop
+    while True:
+        process_once()
+        time.sleep(float(args.interval))
 
 
 if __name__ == "__main__":

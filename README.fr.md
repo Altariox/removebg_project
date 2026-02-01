@@ -24,6 +24,9 @@ chmod +x run_removebg.sh
 
 # GPU (si dispo)
 USE_GPU=1 ./run_removebg.sh
+
+# Mode continu : scan toutes les 10 secondes
+WATCH=1 INTERVAL=10 ./run_removebg.sh /home/altariox/Videos/removebg
 ```
 
 ## Utilisation (Python)

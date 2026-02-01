@@ -20,8 +20,15 @@ INTERVAL_SEC="${INTERVAL:-10}"
 MIN_AGE_SEC="${MIN_AGE:-2}"
 QUALITY="${QUALITY:-95}"
 FORCE_FLAG="${FORCE:-0}"      # 1=reprocess even if state says seen
+FIX_PERMS_FLAG="${FIX_PERMS:-0}"  # 1=try to fix ownership/permissions via docker (no sudo)
 
 USE_GPU_FLAG="${USE_GPU:-0}"      # 1=try GPU (needs NVIDIA toolkit)
+
+HOST_UID="$(id -u)"
+HOST_GID="$(id -g)"
+
+# Cache for rembg/u2net models on the host (avoid re-downloading)
+mkdir -p "$HOME/.u2net"
 REBUILD_FLAG="${REBUILD:-0}"      # 1=force rebuild Docker image
 
 if [[ ! -d "$INPUT_DIR" ]]; then
@@ -38,11 +45,25 @@ IMAGE_CPU="removebg-onefile:cpu"
 IMAGE_GPU="removebg-onefile:gpu"
 
 IMAGE="$IMAGE_CPU"
-DOCKER_RUN_ARGS=(--rm -i)
+DOCKER_RUN_ARGS=(
+  --rm -i
+  --user "${HOST_UID}:${HOST_GID}"
+  -e "HOME=/tmp"
+  -e "U2NET_HOME=/models"
+)
 
 if [[ "$USE_GPU_FLAG" == "1" ]]; then
   IMAGE="$IMAGE_GPU"
   DOCKER_RUN_ARGS+=(--gpus all)
+fi
+
+if [[ "$FIX_PERMS_FLAG" == "1" ]]; then
+  echo "Fixing ownership in: $INPUT_DIR (uid=${HOST_UID} gid=${HOST_GID})" >&2
+  docker run --rm \
+    -v "$INPUT_DIR:/data" \
+    alpine:3.19 \
+    sh -lc "chown -R ${HOST_UID}:${HOST_GID} /data || true; chmod -R u+rwX /data || true" \
+    >/dev/null 2>&1 || true
 fi
 
 if [[ "$REBUILD_FLAG" == "1" ]] || ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
@@ -100,10 +121,11 @@ fi
 
 docker run "${DOCKER_RUN_ARGS[@]}" \
   -v "$INPUT_DIR:/data" \
-  -v "$HOME/.u2net:/root/.u2net" \
+  -v "$HOME/.u2net:/models" \
   "$IMAGE" \
   bash -s -- "$WATCH_FLAG" "$INTERVAL_SEC" "$MIN_AGE_SEC" "$QUALITY" "$FORCE_FLAG" <<'BASH'
 set -eo pipefail
+shopt -s nullglob
 
 WATCH_FLAG="$1"
 INTERVAL_SEC="$2"

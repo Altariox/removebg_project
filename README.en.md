@@ -11,11 +11,10 @@ Batch tool that:
 - No-background output: `<input>/output/*_nobg.png`
 
 ## Requirements
-- Python 3
-- Packages: `Pillow`, `rembg`
-- Optional GPU (NVIDIA): `onnxruntime-gpu` + CUDA drivers/toolkit correctly installed
+- Docker (recommended; required on hosts where Python 3.14 cannot install onnxruntime)
+- Optional GPU (NVIDIA): Docker + `nvidia-container-toolkit` + CUDA drivers
 
-## Usage (recommended)
+## Usage (recommended, Docker)
 ```bash
 cd /home/altariox/Documents/Code_projects/removebg_project
 chmod +x run_removebg.sh
@@ -28,7 +27,10 @@ USE_GPU=1 ./run_removebg.sh
 ```
 
 ## Usage (Python directly)
+This requires a supported Python version (typically 3.10–3.13) and the CPU/GPU backend.
+
 ```bash
+pip install "rembg[cpu]" Pillow
 python3 removebg_batch.py --input-dir /home/altariox/Videos/removebg --skip-existing
 # GPU try (falls back to CPU)
 python3 removebg_batch.py --input-dir /home/altariox/Videos/removebg --skip-existing --prefer-gpu

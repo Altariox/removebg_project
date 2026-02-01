@@ -78,7 +78,14 @@ def convert_to_jpg(input_path: Path, jpg_path: Path, quality: int = 95) -> None:
 
 def _create_rembg_session(prefer_gpu: bool):
     # rembg uses onnxruntime under the hood; providers are passed to new_session.
-    from rembg import new_session
+    try:
+        from rembg import new_session
+    except Exception as e:
+        raise RuntimeError(
+            "rembg backend is not available in this Python environment. "
+            "On many systems Python 3.14 cannot install onnxruntime yet. "
+            "Use the Docker launcher: ./run_removebg.sh"
+        ) from e
 
     if not prefer_gpu:
         return new_session("u2net", providers=["CPUExecutionProvider"])
@@ -94,7 +101,13 @@ def _create_rembg_session(prefer_gpu: bool):
 def remove_background(jpg_path: Path, out_path: Path, prefer_gpu: bool) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    from rembg import remove
+    try:
+        from rembg import remove
+    except Exception as e:
+        raise RuntimeError(
+            "rembg backend is not available in this Python environment. "
+            "Use the Docker launcher: ./run_removebg.sh"
+        ) from e
 
     session = _create_rembg_session(prefer_gpu=prefer_gpu)
     data = jpg_path.read_bytes()

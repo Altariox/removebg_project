@@ -7,5 +7,6 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INPUT_DIR="${1:-/home/altariox/Videos/removebg}"
+INPUT_DIR="${1:-/home/altariox/Pictures/removebg}"
 
 WATCH=1 INTERVAL="${INTERVAL:-10}" "$SCRIPT_DIR/run_removebg.sh" "$INPUT_DIR"

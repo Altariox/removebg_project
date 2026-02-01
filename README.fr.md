@@ -6,9 +6,8 @@ Outil batch qui :
 3) écrit un PNG **transparent** (format le plus utile après détourage)
 
 ## Entrée / Sortie
-- Dossier d’entrée (par défaut) : `/home/altariox/Videos/removebg`
-- Sortie JPG : `<entrée>/jpg/*.jpg`
-- Sortie sans fond : `<entrée>/output/*_nobg.png`
+- Dossier entrée/sortie (par défaut) : `/home/altariox/Pictures/removebg`
+- Comportement par défaut : remplacement in-place en `<entrée>/<nom>.jpg`
 
 ## Prérequis
 - Docker (recommandé ; requis si Python 3.14 ne peut pas installer onnxruntime)
@@ -26,7 +25,7 @@ chmod +x run_removebg.sh
 USE_GPU=1 ./run_removebg.sh
 
 # Mode continu : scan toutes les 10 secondes
-WATCH=1 INTERVAL=10 ./run_removebg.sh /home/altariox/Videos/removebg
+WATCH=1 INTERVAL=10 ./run_removebg.sh /home/altariox/Pictures/removebg
 ```
 
 ## Utilisation (Python)

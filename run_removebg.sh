@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Batch conversion + remove background.
-# Default input folder: /home/altariox/Videos/removebg
+# Default input/output folder (in-place): /home/altariox/Pictures/removebg
 #
 # This project uses rembg (onnxruntime). On this machine Python is 3.14, and
 # onnxruntime wheels may not be available for 3.14. So this launcher runs the
@@ -11,7 +11,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$SCRIPT_DIR"
 
-INPUT_DIR="${1:-/home/altariox/Videos/removebg}"
+INPUT_DIR="${1:-/home/altariox/Pictures/removebg}"
 shift || true
 
 # Extra args passed to the Python script (e.g., --interval 5)
@@ -51,6 +51,11 @@ fi
 EXTRA_ARGS=()
 if [[ "$USE_GPU_FLAG" == "1" ]]; then
   EXTRA_ARGS+=("--prefer-gpu")
+fi
+
+# In-place mode by default: replace originals with <stem>.jpg in the same folder.
+if [[ "${INPLACE:-1}" == "1" ]]; then
+  EXTRA_ARGS+=("--inplace-jpg")
 fi
 
 # Continuous mode: set WATCH=1 (interval defaults to 10 seconds)

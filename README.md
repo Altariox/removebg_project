@@ -6,15 +6,17 @@ Quick start (CPU):
 
 ```bash
 chmod +x run_removebg.sh
-./run_removebg.sh /home/altariox/Videos/removebg
+./run_removebg.sh /home/altariox/Pictures/removebg
 ```
 
 Continuous mode (scan every 10s):
 
 ```bash
 chmod +x watch_removebg.sh
-./watch_removebg.sh /home/altariox/Videos/removebg
+./watch_removebg.sh /home/altariox/Pictures/removebg
 ```
+
+By default the launcher runs in-place: it replaces originals with `<stem>.jpg`.
 
 - English: [README.en.md](README.en.md)
 - Français: [README.fr.md](README.fr.md)

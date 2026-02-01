@@ -6,9 +6,8 @@ Batch tool that:
 3) writes a transparent **PNG** output (best format for cut-outs)
 
 ## Input / Output
-- Input folder (default): `/home/altariox/Videos/removebg`
-- JPG output: `<input>/jpg/*.jpg`
-- No-background output: `<input>/output/*_nobg.png`
+- Input/output folder (default): `/home/altariox/Pictures/removebg`
+- Default behavior: in-place replacement to `<input>/<stem>.jpg`
 
 ## Requirements
 - Docker (recommended; required on hosts where Python 3.14 cannot install onnxruntime)
@@ -26,7 +25,7 @@ chmod +x run_removebg.sh
 USE_GPU=1 ./run_removebg.sh
 
 # Watch mode: scan every 10 seconds
-WATCH=1 INTERVAL=10 ./run_removebg.sh /home/altariox/Videos/removebg
+WATCH=1 INTERVAL=10 ./run_removebg.sh /home/altariox/Pictures/removebg
 ```
 
 ## Usage (Python directly)

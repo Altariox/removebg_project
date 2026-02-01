@@ -6,9 +6,8 @@ Herramienta por lotes que:
 3) guarda un PNG **transparente** (el formato más útil para recortes)
 
 ## Entrada / Salida
-- Carpeta de entrada (por defecto): `/home/altariox/Videos/removebg`
-- Salida JPG: `<entrada>/jpg/*.jpg`
-- Salida sin fondo: `<entrada>/output/*_nobg.png`
+- Carpeta de entrada/salida (por defecto): `/home/altariox/Pictures/removebg`
+- Comportamiento por defecto: reemplazo in-place a `<entrada>/<nombre>.jpg`
 
 ## Requisitos
 - Docker (recomendado; obligatorio si Python 3.14 no puede instalar onnxruntime)
@@ -26,7 +25,7 @@ chmod +x run_removebg.sh
 USE_GPU=1 ./run_removebg.sh
 
 # Modo continuo: escanear cada 10 segundos
-WATCH=1 INTERVAL=10 ./run_removebg.sh /home/altariox/Videos/removebg
+WATCH=1 INTERVAL=10 ./run_removebg.sh /home/altariox/Pictures/removebg
 ```
 
 ## Uso (Python)

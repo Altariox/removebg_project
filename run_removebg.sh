@@ -45,8 +45,14 @@ fi
 
 if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
   echo "Building Docker image: $IMAGE" >&2
+  BUILD_CTX="$(mktemp -d)"
+  cleanup() {
+    rm -rf "$BUILD_CTX" 2>/dev/null || true
+  }
+  trap cleanup EXIT
+
   if [[ "$USE_GPU_FLAG" == "1" ]]; then
-    docker build -t "$IMAGE" -f - . <<'DOCKER'
+    docker build -t "$IMAGE" -f - "$BUILD_CTX" <<'DOCKER'
 FROM nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -69,7 +75,7 @@ RUN micromamba create -y -n app -c conda-forge python=3.12 pip \
 ENTRYPOINT ["micromamba", "run", "-n", "app"]
 DOCKER
   else
-    docker build -t "$IMAGE" -f - . <<'DOCKER'
+    docker build -t "$IMAGE" -f - "$BUILD_CTX" <<'DOCKER'
 FROM python:3.12-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -83,6 +89,9 @@ RUN python -m pip install --no-cache-dir -U pip \
   && python -m pip install --no-cache-dir "rembg[cpu]" Pillow
 DOCKER
   fi
+
+  trap - EXIT
+  cleanup
 fi
 
 docker run "${DOCKER_RUN_ARGS[@]}" \

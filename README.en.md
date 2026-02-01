@@ -24,19 +24,15 @@ chmod +x run_removebg.sh
 # GPU (if available)
 USE_GPU=1 ./run_removebg.sh
 
-# Watch mode: scan every 10 seconds
+# Watch mode (default): scan every 10 seconds
 WATCH=1 INTERVAL=10 ./run_removebg.sh /home/altariox/Pictures/removebg
+
+# One-shot
+WATCH=0 ./run_removebg.sh /home/altariox/Pictures/removebg
 ```
 
-## Usage (Python directly)
-This requires a supported Python version (typically 3.10–3.13) and the CPU/GPU backend.
-
-```bash
-pip install "rembg[cpu]" Pillow
-python3 removebg_batch.py --input-dir /home/altariox/Videos/removebg --skip-existing
-# GPU try (falls back to CPU)
-python3 removebg_batch.py --input-dir /home/altariox/Videos/removebg --skip-existing --prefer-gpu
-```
+## Notes
+- This is a single-file runner (`run_removebg.sh`). It embeds the Python logic and runs it in Docker.
 
 ## Notes
 - JPEG has no transparency; during conversion, transparent areas are composited on white.

@@ -1,5 +1,0 @@
-Pillow>=10.2.0
-# rembg uses onnxruntime. On many distros, onnxruntime wheels are not yet
-# available for Python 3.14, so local installs may fail.
-# Recommended: use the provided Docker launcher.
-rembg[cpu]>=2.0.57; python_version < '3.14'

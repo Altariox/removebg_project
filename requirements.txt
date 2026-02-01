@@ -1,0 +1,4 @@
+Pillow>=10.2.0
+rembg>=2.0.57
+# GPU (NVIDIA/CUDA) optionnel : décommente si tu as CUDA installé
+# onnxruntime-gpu>=1.17.0

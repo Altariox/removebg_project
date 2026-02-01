@@ -19,8 +19,10 @@ WATCH_FLAG="${WATCH:-1}"          # 1=continuous, 0=one-shot
 INTERVAL_SEC="${INTERVAL:-10}"
 MIN_AGE_SEC="${MIN_AGE:-2}"
 QUALITY="${QUALITY:-95}"
+FORCE_FLAG="${FORCE:-0}"      # 1=reprocess even if state says seen
 
 USE_GPU_FLAG="${USE_GPU:-0}"      # 1=try GPU (needs NVIDIA toolkit)
+REBUILD_FLAG="${REBUILD:-0}"      # 1=force rebuild Docker image
 
 if [[ ! -d "$INPUT_DIR" ]]; then
   echo "Input directory not found: $INPUT_DIR" >&2
@@ -43,7 +45,7 @@ if [[ "$USE_GPU_FLAG" == "1" ]]; then
   DOCKER_RUN_ARGS+=(--gpus all)
 fi
 
-if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
+if [[ "$REBUILD_FLAG" == "1" ]] || ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
   echo "Building Docker image: $IMAGE" >&2
   BUILD_CTX="$(mktemp -d)"
   cleanup() {
@@ -68,7 +70,7 @@ RUN curl -Ls https://micro.mamba.pm/api/micromamba/linux-64/latest | tar -xvj bi
 
 RUN micromamba create -y -n app -c conda-forge python=3.12 pip \
   && micromamba run -n app python -m pip install --no-cache-dir -U pip \
-  && micromamba run -n app python -m pip install --no-cache-dir "rembg[gpu]" Pillow \
+  && micromamba run -n app python -m pip install --no-cache-dir "rembg[gpu,cli]" Pillow \
   && apt-get update && apt-get install -y --no-install-recommends imagemagick \
   && rm -rf /var/lib/apt/lists/*
 
@@ -78,15 +80,17 @@ DOCKER
     docker build -t "$IMAGE" -f - "$BUILD_CTX" <<'DOCKER'
 FROM python:3.12-slim
 
+ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
+    bash \
     libglib2.0-0 \
     libgl1 \
     imagemagick \
   && rm -rf /var/lib/apt/lists/*
 
 RUN python -m pip install --no-cache-dir -U pip \
-  && python -m pip install --no-cache-dir "rembg[cpu]" Pillow
+  && python -m pip install --no-cache-dir "rembg[cpu,cli]" Pillow
 DOCKER
   fi
 
@@ -98,13 +102,14 @@ docker run "${DOCKER_RUN_ARGS[@]}" \
   -v "$INPUT_DIR:/data" \
   -v "$HOME/.u2net:/root/.u2net" \
   "$IMAGE" \
-  bash -s -- "$WATCH_FLAG" "$INTERVAL_SEC" "$MIN_AGE_SEC" "$QUALITY" <<'BASH'
-set -euo pipefail
+  bash -s -- "$WATCH_FLAG" "$INTERVAL_SEC" "$MIN_AGE_SEC" "$QUALITY" "$FORCE_FLAG" <<'BASH'
+set -eo pipefail
 
 WATCH_FLAG="$1"
 INTERVAL_SEC="$2"
 MIN_AGE_SEC="$3"
 QUALITY="$4"
+FORCE_FLAG="$5"
 
 DIR="/data"
 STATE_FILE="$DIR/.removebg_state.tsv"
@@ -145,7 +150,7 @@ process_one() {
   mtime="$(stat -c %Y "$src" 2>/dev/null || true)"
   [[ -n "$mtime" ]] || return 0
 
-  if [[ "${SEEN[$key]:-}" == "$mtime" ]]; then
+  if [[ "$FORCE_FLAG" != "1" && "${SEEN[$key]:-}" == "$mtime" ]]; then
     return 0
   fi
 
@@ -176,22 +181,56 @@ process_one() {
   local tmp_png="$DIR/.tmp_removebg_${stem}_$$.png"
   local tmp_out="$DIR/.tmp_removebg_${stem}_$$.out.jpg"
 
+  cleanup_tmps() {
+    rm -f "$tmp_jpg" "$tmp_png" "$tmp_out" 2>/dev/null || true
+  }
+
   # Convert/normalize to JPG (flatten alpha to white)
-  magick "$src" -auto-orient -background white -alpha remove -quality "$QUALITY" "$tmp_jpg"
+  if ! magick "$src" -auto-orient -background white -alpha remove -quality "$QUALITY" "$tmp_jpg"; then
+    echo "[FAIL] $base (magick->jpg)" >&2
+    cleanup_tmps
+    return 1
+  fi
 
   # Remove background (outputs PNG with alpha)
-  rembg i "$tmp_jpg" "$tmp_png" >/dev/null
+  local rembg_err
+  rembg_err="$(rembg i "$tmp_jpg" "$tmp_png" 2>&1)" || {
+    echo "[FAIL] $base (rembg)" >&2
+    printf '%s\n' "$rembg_err" | tail -n 40 >&2
+    cleanup_tmps
+    return 1
+  }
+  if [[ ! -s "$tmp_png" ]]; then
+    echo "[FAIL] $base (rembg produced empty output)" >&2
+    cleanup_tmps
+    return 1
+  fi
 
   # Convert output PNG to final JPG (flatten on white)
-  magick "$tmp_png" -background white -alpha remove -quality "$QUALITY" "$tmp_out"
+  if ! magick "$tmp_png" -background white -alpha remove -quality "$QUALITY" "$tmp_out"; then
+    echo "[FAIL] $base (magick png->jpg)" >&2
+    cleanup_tmps
+    return 1
+  fi
+  if [[ ! -s "$tmp_out" ]]; then
+    echo "[FAIL] $base (magick produced empty output)" >&2
+    cleanup_tmps
+    return 1
+  fi
 
   mv -f "$tmp_out" "$target"
 
-  rm -f "$tmp_jpg" "$tmp_png" || true
+  rm -f "$tmp_jpg" "$tmp_png" 2>/dev/null || true
 
   # Delete original if it wasn't already the target
-  if [[ "$(realpath "$src")" != "$(realpath "$target")" ]]; then
-    rm -f -- "$src" || true
+  if command -v realpath >/dev/null 2>&1; then
+    if [[ "$(realpath "$src")" != "$(realpath "$target")" ]]; then
+      rm -f -- "$src" || true
+    fi
+  else
+    if [[ "$src" != "$target" ]]; then
+      rm -f -- "$src" || true
+    fi
   fi
 
   # Update state for both names
@@ -206,13 +245,18 @@ echo "Mode:     in-place (replaces originals with .jpg)"
 echo "Watch:    $WATCH_FLAG (interval=${INTERVAL_SEC}s)"
 echo "Min age:  ${MIN_AGE_SEC}s"
 echo "Quality:  $QUALITY"
+echo "Force:    $FORCE_FLAG"
 
 while true; do
   changed=0
   for f in "$DIR"/*; do
     [[ -f "$f" ]] || continue
     before_count="${#SEEN[@]}"
-    process_one "$f" || true
+    if [[ "$WATCH_FLAG" == "0" ]]; then
+      process_one "$f"
+    else
+      process_one "$f" || true
+    fi
     after_count="${#SEEN[@]}"
     if [[ "$before_count" != "$after_count" ]]; then
       changed=1

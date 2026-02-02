@@ -22,6 +22,12 @@ QUALITY="${QUALITY:-95}"
 FORCE_FLAG="${FORCE:-0}"      # 1=reprocess even if state says seen
 FIX_PERMS_FLAG="${FIX_PERMS:-0}"  # 1=try to fix ownership/permissions via docker (no sudo)
 
+# Performance throttling (lower impact on your PC; slower processing).
+CPU_LIMIT="${CPU_LIMIT:-0.5}"         # Docker CPU quota, e.g. 0.5, 1, 2. Use 0 to disable.
+CPU_SHARES="${CPU_SHARES:-128}"       # Relative CPU weight (1024 is default).
+THREADS="${THREADS:-1}"               # Limit threads used by numpy/onnx/imagemagick.
+INITIAL_SCAN="${INITIAL_SCAN:-1}"     # 1=process existing files on start, 0=only new/changed.
+
 USE_GPU_FLAG="${USE_GPU:-0}"      # 1=try GPU (needs NVIDIA toolkit)
 
 HOST_UID="$(id -u)"
@@ -50,7 +56,20 @@ DOCKER_RUN_ARGS=(
   --user "${HOST_UID}:${HOST_GID}"
   -e "HOME=/tmp"
   -e "U2NET_HOME=/models"
+  -e "OMP_NUM_THREADS=${THREADS}"
+  -e "OPENBLAS_NUM_THREADS=${THREADS}"
+  -e "MKL_NUM_THREADS=${THREADS}"
+  -e "NUMEXPR_NUM_THREADS=${THREADS}"
+  -e "MAGICK_THREAD_LIMIT=${THREADS}"
+  -e "INITIAL_SCAN=${INITIAL_SCAN}"
 )
+
+if [[ "${CPU_LIMIT}" != "0" && -n "${CPU_LIMIT}" ]]; then
+  DOCKER_RUN_ARGS+=(--cpus "${CPU_LIMIT}")
+fi
+if [[ -n "${CPU_SHARES}" ]]; then
+  DOCKER_RUN_ARGS+=(--cpu-shares "${CPU_SHARES}")
+fi
 
 if [[ "$USE_GPU_FLAG" == "1" ]]; then
   IMAGE="$IMAGE_GPU"
@@ -134,22 +153,18 @@ QUALITY="$4"
 FORCE_FLAG="$5"
 
 DIR="/data"
-STATE_FILE="$DIR/.removebg_state.tsv"
+LAST_SCAN_FILE="$DIR/.removebg_last_scan"
 
-touch "$STATE_FILE"
+read_last_scan() {
+  if [[ -f "$LAST_SCAN_FILE" ]]; then
+    cat "$LAST_SCAN_FILE" 2>/dev/null || echo 0
+  else
+    echo 0
+  fi
+}
 
-declare -A SEEN
-while IFS=$'\t' read -r name mtime; do
-  [[ -n "${name:-}" ]] || continue
-  SEEN["$name"]="$mtime"
-done < "$STATE_FILE"
-
-save_state() {
-  : > "$STATE_FILE.tmp"
-  for k in "${!SEEN[@]}"; do
-    printf '%s\t%s\n' "$k" "${SEEN[$k]}" >> "$STATE_FILE.tmp"
-  done
-  mv -f "$STATE_FILE.tmp" "$STATE_FILE"
+write_last_scan() {
+  printf '%s\n' "$1" > "$LAST_SCAN_FILE" 2>/dev/null || true
 }
 
 is_stable() {
@@ -164,21 +179,16 @@ is_stable() {
 
 process_one() {
   local src="$1"
+  local src_mtime_raw="$2"
   local base stem ext mtime key
 
   base="$(basename -- "$src")"
-  key="$base"
-
-  mtime="$(stat -c %Y "$src" 2>/dev/null || true)"
+  mtime="${src_mtime_raw%.*}"
+  [[ -n "$mtime" ]] || mtime="$(stat -c %Y "$src" 2>/dev/null || true)"
   [[ -n "$mtime" ]] || return 0
 
-  if [[ "$FORCE_FLAG" != "1" && "${SEEN[$key]:-}" == "$mtime" ]]; then
-    return 0
-  fi
-
   # Skip the state file and temp artifacts
-  if [[ "$base" == ".removebg_state.tsv" ]] || [[ "$base" == *.tmp ]] || [[ "$base" == .tmp_removebg_* ]]; then
-    SEEN["$key"]="$mtime"
+  if [[ "$base" == ".removebg_state.tsv" ]] || [[ "$base" == ".removebg_last_scan" ]] || [[ "$base" == *.tmp ]] || [[ "$base" == .tmp_removebg_* ]]; then
     return 0
   fi
 
@@ -188,7 +198,6 @@ process_one() {
   case "$ext" in
     jpg|jpeg|png|webp|bmp|tif|tiff|gif|ppm) : ;;
     *)
-      SEEN["$key"]="$mtime"
       return 0
       ;;
   esac
@@ -244,6 +253,9 @@ process_one() {
 
   rm -f "$tmp_jpg" "$tmp_png" 2>/dev/null || true
 
+  # Preserve original mtime so the watcher doesn't reprocess the same file.
+  touch -d "@${mtime}" "$target" 2>/dev/null || true
+
   # Delete original if it wasn't already the target
   if command -v realpath >/dev/null 2>&1; then
     if [[ "$(realpath "$src")" != "$(realpath "$target")" ]]; then
@@ -255,10 +267,6 @@ process_one() {
     fi
   fi
 
-  # Update state for both names
-  SEEN["$key"]="$mtime"
-  SEEN["$(basename -- "$target")"]="$(stat -c %Y "$target" 2>/dev/null || echo 0)"
-
   echo "[OK] $base -> $(basename -- "$target") (replaced)"
 }
 
@@ -269,23 +277,44 @@ echo "Min age:  ${MIN_AGE_SEC}s"
 echo "Quality:  $QUALITY"
 echo "Force:    $FORCE_FLAG"
 
-while true; do
-  changed=0
-  for f in "$DIR"/*; do
-    [[ -f "$f" ]] || continue
-    before_count="${#SEEN[@]}"
-    if [[ "$WATCH_FLAG" == "0" ]]; then
-      process_one "$f"
-    else
-      process_one "$f" || true
-    fi
-    after_count="${#SEEN[@]}"
-    if [[ "$before_count" != "$after_count" ]]; then
-      changed=1
-    fi
-  done
+last_scan="$(read_last_scan)"
+if [[ "$WATCH_FLAG" != "0" && "$INITIAL_SCAN" == "0" && "$last_scan" == "0" ]]; then
+  last_scan="$(date +%s)"
+  write_last_scan "$last_scan"
+fi
 
-  save_state
+while true; do
+  now="$(date +%s)"
+
+  # In one-shot mode, we process all candidate files.
+  # In watch mode, we only consider files modified since last_scan.
+  cutoff="0"
+  if [[ "$WATCH_FLAG" != "0" && "$FORCE_FLAG" != "1" ]]; then
+    cutoff="$last_scan"
+  fi
+
+  if [[ "$cutoff" == "0" ]]; then
+    while IFS= read -r -d '' p && IFS= read -r -d '' mt; do
+      if [[ "$WATCH_FLAG" == "0" ]]; then
+        process_one "$p" "$mt"
+      else
+        process_one "$p" "$mt" || true
+      fi
+    done < <(find "$DIR" -maxdepth 1 -type f -print0 -printf '%p\0%T@\0')
+  else
+    while IFS= read -r -d '' p && IFS= read -r -d '' mt; do
+      if [[ "$WATCH_FLAG" == "0" ]]; then
+        process_one "$p" "$mt"
+      else
+        process_one "$p" "$mt" || true
+      fi
+    done < <(find "$DIR" -maxdepth 1 -type f -newermt "@${cutoff}" -print0 -printf '%p\0%T@\0')
+  fi
+
+  if [[ "$WATCH_FLAG" != "0" ]]; then
+    last_scan="$now"
+    write_last_scan "$last_scan"
+  fi
 
   if [[ "$WATCH_FLAG" == "0" ]]; then
     exit 0

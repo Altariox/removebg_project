@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+shopt -s lastpipe 2>/dev/null || true
 
 # One-file runner (only this .sh is needed):
 # - watches a folder, every N seconds
@@ -28,14 +29,47 @@ CPU_SHARES="${CPU_SHARES:-128}"       # Relative CPU weight (1024 is default).
 THREADS="${THREADS:-1}"               # Limit threads used by numpy/onnx/imagemagick.
 INITIAL_SCAN="${INITIAL_SCAN:-1}"     # 1=process existing files on start, 0=only new/changed.
 
+# Notifications & startup behavior
+NOTIFY_FLAG="${NOTIFY:-1}"            # 1=desktop notifications (if available), 0=disable.
+NOTIFY_FILES_FLAG="${NOTIFY_FILES:-0}" # 1=notify on each processed file (can be spammy).
+FAST_START_FLAG="${FAST_START:-0}"    # 1=skip initial scan when watching for fastest startup.
+
+# Watch implementation inside container
+EVENT_WATCH_FLAG="${EVENT_WATCH:-1}"  # 1=use inotify if available (instant), 0=polling only.
+
 USE_GPU_FLAG="${USE_GPU:-0}"      # 1=try GPU (needs NVIDIA toolkit)
 
 HOST_UID="$(id -u)"
 HOST_GID="$(id -g)"
 
+ts() { date '+%Y-%m-%d %H:%M:%S'; }
+log() { printf '[%s] %s\n' "$(ts)" "$*"; }
+
+can_desktop_notify() {
+  [[ "${NOTIFY_FLAG}" == "1" ]] || return 1
+  command -v notify-send >/dev/null 2>&1 || return 1
+  # A desktop session typically exposes at least one of these.
+  [[ -n "${DBUS_SESSION_BUS_ADDRESS:-}" ]] || return 1
+  [[ -n "${DISPLAY:-}" || -n "${WAYLAND_DISPLAY:-}" ]] || return 1
+  return 0
+}
+
+notify_user() {
+  local title="$1"; shift
+  local body="$*"
+  if can_desktop_notify; then
+    notify-send -a "removebg" -u low "$title" "$body" >/dev/null 2>&1 || true
+  fi
+  log "$title: $body"
+}
+
 # Cache for rembg/u2net models on the host (avoid re-downloading)
 mkdir -p "$HOME/.u2net"
 REBUILD_FLAG="${REBUILD:-0}"      # 1=force rebuild Docker image
+
+if [[ "${FAST_START_FLAG}" == "1" && "${WATCH_FLAG}" != "0" ]]; then
+  INITIAL_SCAN="0"
+fi
 
 if [[ ! -d "$INPUT_DIR" ]]; then
   echo "Input directory not found: $INPUT_DIR" >&2
@@ -46,6 +80,8 @@ if ! command -v docker >/dev/null 2>&1; then
   echo "Docker is required but not found in PATH." >&2
   exit 3
 fi
+
+notify_user "removebg" "Démarrage… dossier='$INPUT_DIR' watch=${WATCH_FLAG} gpu=${USE_GPU_FLAG} fast_start=${FAST_START_FLAG}"
 
 IMAGE_CPU="removebg-onefile:cpu"
 IMAGE_GPU="removebg-onefile:gpu"
@@ -62,6 +98,7 @@ DOCKER_RUN_ARGS=(
   -e "NUMEXPR_NUM_THREADS=${THREADS}"
   -e "MAGICK_THREAD_LIMIT=${THREADS}"
   -e "INITIAL_SCAN=${INITIAL_SCAN}"
+  -e "EVENT_WATCH=${EVENT_WATCH_FLAG}"
 )
 
 if [[ "${CPU_LIMIT}" != "0" && -n "${CPU_LIMIT}" ]]; then
@@ -86,7 +123,7 @@ if [[ "$FIX_PERMS_FLAG" == "1" ]]; then
 fi
 
 if [[ "$REBUILD_FLAG" == "1" ]] || ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
-  echo "Building Docker image: $IMAGE" >&2
+  notify_user "removebg" "Construction de l'image Docker: $IMAGE (première fois = plus long)"
   BUILD_CTX="$(mktemp -d)"
   cleanup() {
     rm -rf "$BUILD_CTX" 2>/dev/null || true
@@ -99,8 +136,9 @@ FROM nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates curl bzip2 \
+  ca-certificates curl bzip2 \
     libglib2.0-0 libgl1 \
+  inotify-tools \
   && rm -rf /var/lib/apt/lists/*
 
 ENV MAMBA_ROOT_PREFIX=/opt/micromamba
@@ -126,6 +164,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     bash \
     libglib2.0-0 \
     libgl1 \
+  inotify-tools \
     imagemagick \
   && rm -rf /var/lib/apt/lists/*
 
@@ -136,8 +175,15 @@ DOCKER
 
   trap - EXIT
   cleanup
+
+  notify_user "removebg" "Image prête: $IMAGE"
+else
+  log "Image Docker trouvée: $IMAGE"
 fi
 
+notify_user "removebg" "Lancement du conteneur…"
+
+ready_notified=0
 docker run "${DOCKER_RUN_ARGS[@]}" \
   -v "$INPUT_DIR:/data" \
   -v "$HOME/.u2net:/models" \
@@ -151,6 +197,7 @@ INTERVAL_SEC="$2"
 MIN_AGE_SEC="$3"
 QUALITY="$4"
 FORCE_FLAG="$5"
+EVENT_WATCH="${EVENT_WATCH:-1}"
 
 DIR="/data"
 LAST_SCAN_FILE="$DIR/.removebg_last_scan"
@@ -181,6 +228,13 @@ process_one() {
   local src="$1"
   local src_mtime_raw="$2"
   local base stem ext mtime key
+
+  # Avoid re-processing files we just wrote ourselves (important for inotify mode)
+  local now
+  now="$(date +%s)"
+  if [[ -n "${RECENT_WRITES["$src"]+x}" ]] && (( now < RECENT_WRITES["$src"] )); then
+    return 0
+  fi
 
   base="$(basename -- "$src")"
   mtime="${src_mtime_raw%.*}"
@@ -256,6 +310,9 @@ process_one() {
   # Preserve original mtime so the watcher doesn't reprocess the same file.
   touch -d "@${mtime}" "$target" 2>/dev/null || true
 
+  # Mark the target as recently written (so inotify doesn't loop)
+  RECENT_WRITES["$target"]=$(( $(date +%s) + MIN_AGE_SEC + 2 ))
+
   # Delete original if it wasn't already the target
   if command -v realpath >/dev/null 2>&1; then
     if [[ "$(realpath "$src")" != "$(realpath "$target")" ]]; then
@@ -270,17 +327,40 @@ process_one() {
   echo "[OK] $base -> $(basename -- "$target") (replaced)"
 }
 
+declare -A RECENT_WRITES
+
 echo "Folder:   $DIR"
 echo "Mode:     in-place (replaces originals with .jpg)"
 echo "Watch:    $WATCH_FLAG (interval=${INTERVAL_SEC}s)"
 echo "Min age:  ${MIN_AGE_SEC}s"
 echo "Quality:  $QUALITY"
 echo "Force:    $FORCE_FLAG"
+if [[ "$WATCH_FLAG" != "0" && "$EVENT_WATCH" == "1" && "$(command -v inotifywait || true)" != "" ]]; then
+  echo "Watch impl: inotify (instant)"
+else
+  echo "Watch impl: polling"
+fi
 
 last_scan="$(read_last_scan)"
 if [[ "$WATCH_FLAG" != "0" && "$INITIAL_SCAN" == "0" && "$last_scan" == "0" ]]; then
   last_scan="$(date +%s)"
   write_last_scan "$last_scan"
+fi
+
+# If inotify is available, we can avoid polling and react instantly.
+if [[ "$WATCH_FLAG" != "0" && "$EVENT_WATCH" == "1" ]] && command -v inotifywait >/dev/null 2>&1; then
+  if [[ "$INITIAL_SCAN" == "1" || "$FORCE_FLAG" == "1" ]]; then
+    while IFS= read -r -d '' p && IFS= read -r -d '' mt; do
+      process_one "$p" "$mt" || true
+    done < <(find "$DIR" -maxdepth 1 -type f -print0 -printf '%p\0%T@\0')
+  fi
+
+  echo "Waiting for changes (inotify)…"
+  inotifywait -m -e close_write,moved_to,create --format '%w%f' "$DIR" 2>/dev/null | \
+    while IFS= read -r p; do
+      process_one "$p" "" || true
+    done
+  exit 0
 fi
 
 while true; do
@@ -322,3 +402,19 @@ while true; do
   sleep "$INTERVAL_SEC"
 done
 BASH
+2>&1 | while IFS= read -r line; do
+  printf '%s\n' "$line"
+
+  if [[ "${ready_notified}" == "0" && "$line" == Watch:* ]]; then
+    notify_user "removebg" "Prêt: conteneur lancé et en surveillance de '$INPUT_DIR'"
+    ready_notified=1
+  fi
+
+  if [[ "${NOTIFY_FILES_FLAG}" == "1" ]]; then
+    if [[ "$line" == \[OK\]* ]]; then
+      notify_user "removebg" "$line"
+    elif [[ "$line" == \[FAIL\]* ]]; then
+      notify_user "removebg" "$line"
+    fi
+  fi
+done
